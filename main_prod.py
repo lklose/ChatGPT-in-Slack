@@ -161,7 +161,53 @@ def on_message_events(body, client, logger):
             logger.info(f"downloaded {name}, {len(data)} bytes")
         except Exception as e:
             logger.error(f"download failed for {name}: {e}")
-            
+
+# Handle actual file shares
+@app.event({"type": "message", "subtype": "file_share"})
+def handle_file_share(body, client, logger):
+    ev = body["event"]
+    channel = ev["channel"]
+    thread_ts = ev.get("thread_ts") or ev["ts"]
+
+    for f in ev.get("files", []):
+        url = f.get("url_private_download") or f.get("url_private")
+        name = f.get("name", "download.bin")
+        if not url:
+            logger.warning("No download URL on file payload")
+            continue
+
+        try:
+            # Use a Session so the Authorization header survives redirects
+            s = requests.Session()
+            s.headers.update({"Authorization": f"Bearer {os.environ['SLACK_BOT_TOKEN']}"})
+            r = s.get(url, timeout=60)
+            r.raise_for_status()
+            data = r.content
+
+            # If it’s text, decode for preview; otherwise just report bytes
+            try:
+                text = data.decode("utf-8", errors="replace")
+                preview = "\n".join(text.splitlines()[:12])
+                client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"📥 Read *{name}* ({len(data)} bytes). Preview:\n```{preview}```"
+                )
+            except Exception:
+                client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"📥 Read *{name}* ({len(data)} bytes). (Binary file)"
+                )
+
+        except SlackApiError as e:
+            logger.error(f"files_info error: {e.response.get('error')}")
+        except Exception as e:
+            logger.error(f"download failed: {e}")
+            client.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=f"⚠️ Download failed for *{name}*: {e}"
+            )
 
 def handler(event, context_):
     app = App(
