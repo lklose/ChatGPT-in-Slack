@@ -18,6 +18,7 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.http_retry.builtin_handlers import RateLimitErrorRetryHandler
 from slack_bolt import App, Ack, BoltContext
 
+
 from app.bolt_listeners import register_listeners, before_authorize
 from app.env import (
     USE_SLACK_LANGUAGE,
@@ -113,6 +114,54 @@ def register_revocation_handlers(app: App):
                 f"Failed to delete an OpenAI auth key: (team_id: {context.team_id}, error: {e})"
             )
 
+
+@app.event("app_mention")
+def on_mention(body, say, client, logger):
+    text = body["event"].get("text","")
+    channel = body["event"]["channel"]
+    thread_ts = body["event"].get("thread_ts") or body["event"]["ts"]
+
+    if text.lower().strip().startswith(("@windsurf read_inventory", "@chatgptpanel read_inventory", "read_inventory")):
+        try:
+            # Example bytes (replace with your fetched CSV content)
+            csv_bytes = b"name,level,rubric1,rubric2\nCynefin fit,Org,...,...\n"
+            client.files_upload_v2(
+                channels=channel,
+                thread_ts=thread_ts,
+                filename="dec2_inventory.csv",
+                file=csv_bytes,
+                initial_comment="Here’s the current DEC2 inventory CSV"
+            )
+        except SlackApiError as e:
+            logger.error(f"upload failed: {e.response['error']}")
+            say(f"Upload failed: {e.response['error']}", thread_ts=thread_ts)
+        return
+
+
+@app.event("message")
+def on_message_events(body, client, logger):
+    ev = body.get("event", {})
+    if ev.get("subtype") not in (None, "file_share"):
+        return  # ignore edits, joins, etc.
+
+    files = ev.get("files") or []
+    for f in files:
+        # Requires files:read
+        url = f.get("url_private_download") or f.get("url_private")
+        name = f.get("name", "download.bin")
+        if not url:
+            continue
+        try:
+            import requests, os
+            token = os.environ["SLACK_BOT_TOKEN"]
+            r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+            r.raise_for_status()
+            data = r.content
+            # → do something with `data` (parse CSV, send to OpenAI, commit to GitHub, etc.)
+            logger.info(f"downloaded {name}, {len(data)} bytes")
+        except Exception as e:
+            logger.error(f"download failed for {name}: {e}")
+            
 
 def handler(event, context_):
     app = App(
